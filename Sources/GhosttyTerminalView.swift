@@ -4958,6 +4958,9 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     // For NSTextInputClient - accumulates text during key events
     private var keyTextAccumulator: [String]? = nil
+    // Set by doCommandBySelector when IME explicitly requests a newline
+    // (e.g. Korean IME sends insertNewline: after committing text).
+    private var imeNewlineRequested: Bool = false
     private var markedText = NSMutableAttributedString()
     private var lastPerformKeyEvent: TimeInterval?
     private struct SelectionSnapshot {
@@ -4997,9 +5000,14 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 #endif
 
-    // Prevents NSBeep for unimplemented actions from interpretKeyEvents
+    // Called by interpretKeyEvents when IME wants to execute a command
+    // (e.g. Korean IME sends insertNewline: after committing composed text).
     override func doCommand(by selector: Selector) {
-        // Intentionally empty - prevents system beep on unhandled key commands
+        if selector == #selector(insertNewline(_:)),
+           keyTextAccumulator != nil {
+            imeNewlineRequested = true
+        }
+        // Other selectors intentionally ignored - prevents system beep
     }
 
     /// Some third-party voice input apps inject committed text by sending the
@@ -5341,6 +5349,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
         // Set up text accumulator for interpretKeyEvents
         keyTextAccumulator = []
+        imeNewlineRequested = false
         defer { keyTextAccumulator = nil }
 
         // Track whether we had marked text (IME preedit) before this event,
@@ -5457,10 +5466,14 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 }
             }
 
-            if shouldSendCommittedIMEConfirmKey(
-                event: translationEvent,
-                markedTextBefore: markedTextBefore
-            ) {
+            // If the IME explicitly requested a newline (e.g. Korean IME sends
+            // insertNewline: via doCommandBySelector after committing text),
+            // forward the Return key to Ghostty. Japanese/Chinese IMEs do not
+            // send insertNewline: on confirmation, so this correctly avoids
+            // injecting an unwanted newline for those languages.
+            if imeNewlineRequested {
+                imeNewlineRequested = false
+                keyEvent.composing = false
                 keyEvent.consumed_mods = GHOSTTY_MODS_NONE
                 keyEvent.text = nil
 #if DEBUG
@@ -5468,7 +5481,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 _ = sendTimedGhosttyKey(
                     surface,
                     keyEvent,
-                    path: "terminal.keyDown.accumulatedConfirmGhosttySend",
+                    path: "terminal.keyDown.imeNewlineGhosttySend",
                     event: event
                 )
                 ghosttySendMs += (ProcessInfo.processInfo.systemUptime - ghosttySendStart) * 1000.0
@@ -5736,10 +5749,6 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         return true
     }
 
-    private func shouldSendCommittedIMEConfirmKey(event: NSEvent, markedTextBefore: Bool) -> Bool {
-        guard markedTextBefore, markedText.length == 0 else { return false }
-        return event.keyCode == 36 || event.keyCode == 76
-    }
 
     private func ghosttyKeyEvent(for event: NSEvent, surface: ghostty_surface_t) -> ghostty_input_key_s {
         var keyEvent = ghostty_input_key_s()
